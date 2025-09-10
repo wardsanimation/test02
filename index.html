@@ -1,5 +1,3 @@
-```html
-# /index.html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26,6 +24,7 @@
     <div class="scrubber__fill" aria-hidden="true"></div>
     <div class="scrubber__hint" aria-hidden="true">scrub</div>
   </div>
+
   <!-- Screen saver overlay (starts visible on load) -->
   <div id="screensaver" aria-hidden="true">
     <video id="ssv1" playsinline muted preload="auto" autoplay loop>
@@ -37,39 +36,82 @@
   </div>
 
   <script>
-    // ===== Config =====
-    const SCROLL_PX_PER_SEC = 600; // page height per second in the play window
+    // ===== Config (kept your values) =====
+    const SCROLL_PX_PER_SEC = 600; // (kept) not used now, but left in case you re-enable inner scroll
     const PLAY_START = 0;          // seconds
     const PLAY_END   = 17;         // seconds
 
-    // ==== Smoothness & seeking knobs ====
-    const SNAP_TO_FRAMES   = true;   // snap seeks to exact frame boundaries
-    const FPS              = 30;     // set to your source fps (e.g., 25 or 30)
-    const USE_FASTSEEK     = true;   // prefer HTMLMediaElement.fastSeek when available
-    const SMOOTH_TAU_MS    = 220;    // lower = snappier, higher = smoother
+    // ==== Smoothness & seeking knobs (kept) ====
+    const SNAP_TO_FRAMES   = true; // snap seeks to exact frame boundaries
+    const FPS              = 30;   // set to your source fps (e.g., 25 or 30)
+    const USE_FASTSEEK     = true; // prefer HTMLMediaElement.fastSeek when available
+    const SMOOTH_TAU_MS    = 220;  // kept (not needed in progress mode, but left)
 
-    // Screensaver accel factor on interaction
+    // Screensaver accel factor on interaction (kept)
     const SCREENSAVER_ACCEL = 6.0;
 
+    // Elements
     const track = document.getElementById('set-height');
     const vid = document.getElementById('v0');
 
+    // Playback window
     let playStart = PLAY_START;
-    let playEnd = PLAY_END;
+    let playEnd   = PLAY_END;
 
-    function getScrollMax() {
-      return Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    // ====== NEW: Progress-based control (no inner scrolling) ======
+    let progress = 0;           // 0..1 overall progress
+    let allowSync = false;      // becomes true after intro finishes
+
+    function clamp01(v){ return Math.max(0, Math.min(1, v || 0)); }
+
+    function applyVideoFromProgress(p){
+      if (!isFinite(vid.duration) || vid.duration <= 0) return;
+      const start = Math.min(playStart, vid.duration);
+      const end   = Math.min(playEnd,   vid.duration);
+      let t = start + p * Math.max(0, end - start);
+      if (SNAP_TO_FRAMES && FPS > 0) t = Math.round(t * FPS) / FPS;
+      if (USE_FASTSEEK && typeof vid.fastSeek === 'function') {
+        try { vid.fastSeek(t); } catch(_) { vid.currentTime = t; }
+      } else {
+        vid.currentTime = t;
+      }
     }
 
+    function updateScrubFills(){
+      const f1 = document.querySelector('#scrubber .scrubber__fill');
+      const f2 = document.querySelector('#scrubber2 .scrubber__fill');
+      if (f1) f1.style.width = (progress * 100).toFixed(3) + '%';
+      if (f2) f2.style.width = (progress * 100).toFixed(3) + '%';
+      // aria value for accessibility
+      const s1 = document.getElementById('scrubber');
+      const s2 = document.getElementById('scrubber2');
+      if (s1) s1.setAttribute('aria-valuenow', Math.round(progress * 100));
+      if (s2) s2.setAttribute('aria-valuenow', Math.round(progress * 100));
+    }
+
+    // Throttled postMessage to parent (Wix)
+    let lastSent = 0;
+    function sendProgressToParent(p){
+      if (!allowSync) return;
+      const now = performance.now();
+      if (now - lastSent < 80) return; // ~12–15 msgs/sec is plenty
+      lastSent = now;
+      parent.postMessage({ type: 'videoProgress', value: clamp01(p) }, '*');
+    }
+
+    function setProgress(p){
+      progress = clamp01(p);
+      applyVideoFromProgress(progress);
+      updateScrubFills();
+      sendProgressToParent(progress);
+    }
+
+    // Keep your original metadata handling
     function updateScrollTrack() {
       const seconds = Math.max(0.1, (playEnd - playStart) || (PLAY_END - PLAY_START) || 1);
       track.style.height = Math.round(seconds * SCROLL_PX_PER_SEC) + 'px';
     }
-
-    // Create a track immediately so scrolling works before metadata
     document.addEventListener('DOMContentLoaded', updateScrollTrack);
-
-    // Clamp play window once metadata is ready
     vid.addEventListener('loadedmetadata', () => {
       const dur = isFinite(vid.duration) ? vid.duration : 0;
       if (dur > 0) {
@@ -77,108 +119,71 @@
         playEnd   = Math.max(playStart, Math.min(PLAY_END, dur));
       }
       updateScrollTrack();
+      // ensure video matches current progress
+      setProgress(progress);
     });
 
-    // RAF loop: map scroll ratio → currentTime in [playStart, playEnd]
-    (function tick(ts){
-      const max = getScrollMax();
-      let targetR = max > 0 ? (window.pageYOffset / max) : 0;
-      if (targetR < 0) targetR = 0; else if (targetR > 1) targetR = 1;
+    // If video moves (e.g., play, seek), broadcast new progress
+    function computeProgressFromVideo() {
+      if (!vid.duration) return progress;
+      const start = Math.min(playStart, vid.duration);
+      const end   = Math.min(playEnd,   vid.duration);
+      const span  = Math.max(0.0001, end - start);
+      return (vid.currentTime - start) / span;
+    }
+    vid.addEventListener('timeupdate', () => { setProgress(computeProgressFromVideo()); });
+    ['seeking','seeked','play','pause'].forEach(ev => {
+      vid.addEventListener(ev, () => { setProgress(computeProgressFromVideo()); });
+    });
 
-      // time-based exponential smoothing
-      window.__cc_lastTs = window.__cc_lastTs || ts || performance.now();
-      const now = ts || performance.now();
-      const dt = Math.max(0, now - window.__cc_lastTs);
-      window.__cc_lastTs = now;
-      const alpha = 1 - Math.exp(-dt / SMOOTH_TAU_MS);
-      window.__cc_displayR = window.__cc_displayR ?? targetR;
-      window.__cc_displayR += (targetR - window.__cc_displayR) * alpha;
-
-      if (isFinite(vid.duration) && vid.duration > 0) {
-        const start = Math.min(playStart, vid.duration);
-        const end   = Math.min(playEnd, vid.duration);
-        let t = start + window.__cc_displayR * Math.max(0, end - start);
-        if (SNAP_TO_FRAMES && FPS > 0) { t = Math.round(t * FPS) / FPS; }
-        if (USE_FASTSEEK && typeof vid.fastSeek === 'function') {
-          try { vid.fastSeek(t); } catch(_) { vid.currentTime = t; }
-        } else {
-          vid.currentTime = t;
-        }
-      }
-      requestAnimationFrame(tick);
-    })(0);
-
-    // ===== Scrub bars (both map horizontal position → page scroll) =====
+    // ===== Scrub bars (now set progress directly; no inner scroll) =====
     (function initScrubbers() {
-      function createScrubber(root) {
+      function wire(rootId) {
+        const root = document.getElementById(rootId);
+        if (!root) return;
         const fill = root.querySelector('.scrubber__fill');
-        let wasInside = false;
-        let tween = null;
 
-        function cancelTween() {
-          if (tween) { cancelAnimationFrame(tween.raf); tween = null; }
-        }
         function ratioFromClientX(x) {
           const rect = root.getBoundingClientRect();
           const dx = Math.min(Math.max(0, x - rect.left), rect.width);
           return rect.width ? dx / rect.width : 0;
         }
-        function updateFillFromScroll() {
-          const max = getScrollMax();
-          let r = max === 0 ? 0 : window.pageYOffset / max;
-          if (r < 0) r = 0; else if (r > 1) r = 1;
-          if (fill) fill.style.width = (r * 100).toFixed(3) + '%';
-          root.setAttribute('aria-valuenow', Math.round(r * 100));
-        }
-        function ease(t){ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }
-        function smoothScrollTo(targetY) {
-          const max = getScrollMax();
-          targetY = Math.max(0, Math.min(targetY, max));
-          const startY = window.pageYOffset || document.documentElement.scrollTop || 0;
-          const dist = targetY - startY;
-          if (Math.abs(dist) < 1) { window.scrollTo({ top: targetY, behavior: 'auto' }); return; }
-          const dur = Math.min(1200, Math.max(250, 300 + Math.abs(dist) * 0.35));
-          cancelTween();
-          let t0 = null;
-          function step(ts){ if(!t0) t0 = ts; const p = Math.min(1, (ts - t0)/dur); window.scrollTo(0, startY + dist * ease(p)); if (p < 1 && tween) tween.raf = requestAnimationFrame(step); else tween = null; }
-          tween = { raf: requestAnimationFrame(step) };
-        }
-        function setScrollByRatio(r, smooth){ const y = r * getScrollMax(); if (smooth) smoothScrollTo(y); else { cancelTween(); window.scrollTo({ top: y, behavior: 'auto' }); } }
 
-        function onPointerMove(e) {
-          const rect = root.getBoundingClientRect();
-          const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
-          if (inside) {
-            const r = ratioFromClientX(e.clientX);
-            const currentR = getScrollMax() === 0 ? 0 : window.pageYOffset / getScrollMax();
-            setScrollByRatio(r, false);
-          }
-          wasInside = inside;
+        function updateFill() {
+          if (fill) fill.style.width = (progress * 100).toFixed(3) + '%';
+          root.setAttribute('aria-valuenow', Math.round(progress * 100));
         }
 
-        function onKeyDown(e) {
-          let r = getScrollMax() === 0 ? 0 : window.pageYOffset / getScrollMax();
+        let dragging = false;
+        root.addEventListener('pointerdown', (e) => {
+          dragging = true;
+          root.setPointerCapture(e.pointerId);
+          setProgress(ratioFromClientX(e.clientX));
+        });
+        root.addEventListener('pointermove', (e) => {
+          if (!dragging) return;
+          setProgress(ratioFromClientX(e.clientX));
+        });
+        root.addEventListener('pointerup',   () => { dragging = false; });
+        root.addEventListener('pointercancel', () => { dragging = false; });
+
+        root.addEventListener('keydown', (e) => {
+          let r = progress;
           const step = 0.05;
-          if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { r = Math.min(1, r + step); setScrollByRatio(r, true); e.preventDefault(); }
-          else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { r = Math.max(0, r - step); setScrollByRatio(r, true); e.preventDefault(); }
-          else if (e.key === 'Home') { setScrollByRatio(0, true); e.preventDefault(); }
-          else if (e.key === 'End') { setScrollByRatio(1, true); e.preventDefault(); }
-        }
+          if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   { r = Math.min(1, r + step); setProgress(r); e.preventDefault(); }
+          if (e.key === 'ArrowLeft'  || e.key === 'ArrowDown') { r = Math.max(0, r - step); setProgress(r); e.preventDefault(); }
+          if (e.key === 'Home') { setProgress(0); e.preventDefault(); }
+          if (e.key === 'End')  { setProgress(1); e.preventDefault(); }
+        });
 
-        window.addEventListener('scroll', updateFillFromScroll, { passive: true });
-        window.addEventListener('resize', updateFillFromScroll);
-        window.addEventListener('wheel', cancelTween, { passive: true });
-        window.addEventListener('keydown', cancelTween);
-        window.addEventListener('pointermove', onPointerMove, { passive: true });
-        root.addEventListener('keydown', onKeyDown);
-        updateFillFromScroll();
+        window.addEventListener('resize', updateFill);
+        updateFill();
       }
-
-      createScrubber(document.getElementById('scrubber'));
-      createScrubber(document.getElementById('scrubber2'));
+      wire('scrubber');
+      wire('scrubber2');
     })();
 
-    // ===== Screen saver (idle after 1 minute) =====
+    // ===== Screen saver (idle after 1 minute; kept logic) =====
     (function initScreensaver(){
       const IDLE_MS = 60_000; // re-show after idle
       const overlay = document.getElementById('screensaver');
@@ -199,6 +204,7 @@
         v1.loop = true;                // loop until user interacts
         try { v1.play().catch(()=>{}); } catch(_) {}
         accelerating = false;
+        allowSync = false;             // ensure sync is OFF while overlay is up
       }
       function hideOverlay(){
         if (!overlay.classList.contains('is-visible')) return;
@@ -236,9 +242,11 @@
         }
       });
 
+      // 👉 Enable syncing only when the intro finishes
       v2.addEventListener('ended', () => {
         firstSequenceDone = true;
         hideOverlay();
+        allowSync = true;     // <-- sync now allowed
         scheduleIdle();
       });
 
@@ -261,76 +269,11 @@
       showOverlay('initial');
     })();
   </script>
-  <script>
-// ---------- CONFIG (optional) ----------
-// If you have explicit IDs, set them here; otherwise we fallback below.
-const VIDEO_SELECTOR  = '#myVideo';    // e.g. <video id="myVideo">
-const SLIDER_SELECTOR = '#scrubber';   // e.g. <input type="range" id="scrubber">
 
-// ---------- Grab elements (robust fallbacks) ----------
-const video  = document.querySelector(VIDEO_SELECTOR)  || document.querySelector('video');
-const slider = document.querySelector(SLIDER_SELECTOR) || document.querySelector('input[type="range"]');
-
-// tiny helper to clamp 0..1
-const clamp01 = v => Math.max(0, Math.min(1, v || 0));
-
-// throttle sends to avoid spamming parent
-let lastSent = 0;
-function sendProgress(p) {
-  const now = performance.now();
-  if (now - lastSent < 80) return; // ~12–15 msgs/sec is plenty
-  lastSent = now;
-  parent.postMessage({ type: 'videoProgress', value: clamp01(p) }, '*');
-}
-
-// ---------- Emit progress from slider (if present) ----------
-if (slider) {
-  // normalise slider (works even if you left default min/max)
-  const min = Number(slider.min || 0);
-  const max = Number(slider.max || 100);
-  const span = (max - min) || 1;
-
-  // whenever user scrubs, send % to parent
-  slider.addEventListener('input', () => {
-    const val = Number(slider.value || 0);
-    sendProgress((val - min) / span);
-  });
-}
-
-// ---------- Emit progress from video time ----------
-if (video) {
-  // when metadata is ready, send an initial progress (0)
-  video.addEventListener('loadedmetadata', () => {
-    sendProgress((video.currentTime || 0) / (video.duration || 1));
-  });
-
-  // on every timeupdate, send % to parent
-  video.addEventListener('timeupdate', () => {
-    if (!video.duration) return;
-    sendProgress(video.currentTime / video.duration);
-  });
-
-  // if you jump around programmatically (e.g., clicking “building” buttons),
-  // these will ensure we notify parent right away:
-  ['seeking', 'seeked', 'play', 'pause'].forEach(evt => {
-    video.addEventListener(evt, () => {
-      if (!video.duration) return;
-      sendProgress(video.currentTime / video.duration);
-    });
-  });
-}
-</script>
-<style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    width: 100%;
-    overflow: hidden; /* stops inner scrollbars */
-  }
-</style>
-
-
+  <!-- (Kept) Messaging helper consolidated above via sendProgressToParent() -->
+  <style>
+    /* ensure no inner scrollbars (important for Wix iFrame) */
+    html, body { overflow: hidden; }
+  </style>
 </body>
 </html>
-

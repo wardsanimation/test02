@@ -1,9 +1,9 @@
-```
-
-```css
-# /main.css
 /* Core layout */
-html, body { height: 100%; margin: 0; }
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden; /* NEW: stop inner scrollbars inside Wix iFrame */
+}
 
 #v0 {
   position: fixed;
@@ -69,7 +69,8 @@ html, body { height: 100%; margin: 0; }
   background: transparent;
   box-shadow: none;
 }
-#scrubber2 .scrubber__fill, #scrubber2 .scrubber__hint { display: none; }
+#scrubber2 .scrubber__fill,
+#scrubber2 .scrubber__hint { display: none; }
 
 /* Screen saver overlay */
 #screensaver {
@@ -118,43 +119,4 @@ html, body { height: 100%; margin: 0; }
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   #scrubber .scrubber__fill { transition: none; }
-}
-```
-
-```js
-// /sticky.js (unchanged here—kept as-is in your project)
-// No changes required for the scrubber to work.
-```
-
-/\* ===== Mobile & small-height tuning ===== \*/
-@media (max-width: 768px) {
-\#scrubber {
-width: min(96vw, 800px);
-height: clamp(48px, 8vh, 64px);
-bottom: calc(env(safe-area-inset-bottom, 0) + 16px);
-}
-\#scrubber2 {
-width: min(96vw, 800px);
-height: calc(clamp(48px, 8vh, 64px) \* 7);
-bottom: calc(env(safe-area-inset-bottom, 0) + 16px + clamp(48px, 8vh, 64px) + 12px);
-}
-\#scrubber .scrubber\_\_hint { font-size: 11px; }
-}
-\#scrubber2 {
-width: min(92vw, 640px);
-height: calc(clamp(48px, 8vh, 64px) \* 3.5);
-bottom: calc(env(safe-area-inset-bottom, 0) + 16px + clamp(48px, 8vh, 64px) + 12px);
-}
-\#scrubber .scrubber\_\_hint, #scrubber2 .scrubber\_\_hint { font-size: 11px; }
-}
-.scrubber { width: min(92vw, 640px); }
-.scrubber .scrubber\_\_hint { font-size: 11px; }
-\#scrubber { bottom: calc(env(safe-area-inset-bottom, 0) + 16px); }
-\#scrubberTall { bottom: calc(env(safe-area-inset-bottom, 0) + 16px + var(--scrub-h) + var(--scrub-gap)); }
-}
-\#scrubber .scrubber\_\_hint { font-size: 11px; }
-}
-
-@media (max-height: 700px) {
-.content { top: 12%; } /\* why: reduce empty space when the window is short (e.g., split view) \*/
 }
