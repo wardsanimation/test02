@@ -25,7 +25,7 @@
     <div class="scrubber__hint" aria-hidden="true">scrub</div>
   </div>
 
-  <!-- Screen saver overlay (starts visible on load) -->
+  <!-- Screen saver overlay -->
   <div id="screensaver" aria-hidden="true">
     <video id="ssv1" playsinline muted preload="auto" autoplay loop>
       <source src="screensaver.mp4" type="video/mp4" />
@@ -36,18 +36,12 @@
   </div>
 
   <script>
-    // ===== Config (kept your values) =====
-    const SCROLL_PX_PER_SEC = 600; // (kept) not used now, but left in case you re-enable inner scroll
-    const PLAY_START = 0;          // seconds
-    const PLAY_END   = 17;         // seconds
-
-    // ==== Smoothness & seeking knobs (kept) ====
-    const SNAP_TO_FRAMES   = true; // snap seeks to exact frame boundaries
-    const FPS              = 30;   // set to your source fps (e.g., 25 or 30)
-    const USE_FASTSEEK     = true; // prefer HTMLMediaElement.fastSeek when available
-    const SMOOTH_TAU_MS    = 220;  // kept (not needed in progress mode, but left)
-
-    // Screensaver accel factor on interaction (kept)
+    // ===== Config (your values kept) =====
+    const PLAY_START = 0;
+    const PLAY_END   = 17;
+    const SNAP_TO_FRAMES   = true;
+    const FPS              = 30;
+    const USE_FASTSEEK     = true;
     const SCREENSAVER_ACCEL = 6.0;
 
     // Elements
@@ -58,8 +52,8 @@
     let playStart = PLAY_START;
     let playEnd   = PLAY_END;
 
-    // ====== NEW: Progress-based control (no inner scrolling) ======
-    let progress = 0;           // 0..1 overall progress
+    // ====== Progress-based control ======
+    let progress = 0;           // 0..1
     let allowSync = false;      // becomes true after intro finishes
 
     function clamp01(v){ return Math.max(0, Math.min(1, v || 0)); }
@@ -82,48 +76,42 @@
       const f2 = document.querySelector('#scrubber2 .scrubber__fill');
       if (f1) f1.style.width = (progress * 100).toFixed(3) + '%';
       if (f2) f2.style.width = (progress * 100).toFixed(3) + '%';
-      // aria value for accessibility
       const s1 = document.getElementById('scrubber');
       const s2 = document.getElementById('scrubber2');
       if (s1) s1.setAttribute('aria-valuenow', Math.round(progress * 100));
       if (s2) s2.setAttribute('aria-valuenow', Math.round(progress * 100));
     }
 
-    // Throttled postMessage to parent (Wix)
+    // Throttled post to Wix parent (only after intro ends)
     let lastSent = 0;
     function sendProgressToParent(p){
-      if (!allowSync) return;
       const now = performance.now();
-      if (now - lastSent < 80) return; // ~12–15 msgs/sec is plenty
+      if (now - lastSent < 80) return; // throttle
       lastSent = now;
       parent.postMessage({ type: 'videoProgress', value: clamp01(p) }, '*');
     }
 
+    // ✅ Always update video; only message Wix if allowSync is true
     function setProgress(p){
       progress = clamp01(p);
-      applyVideoFromProgress(progress);
+      applyVideoFromProgress(progress);   // ALWAYS seek the video
       updateScrubFills();
-      sendProgressToParent(progress);
+      if (allowSync) {                    // Wix sync gated until intro finishes
+        sendProgressToParent(progress);
+      }
     }
 
-    // Keep your original metadata handling
-    function updateScrollTrack() {
-      const seconds = Math.max(0.1, (playEnd - playStart) || (PLAY_END - PLAY_START) || 1);
-      track.style.height = Math.round(seconds * SCROLL_PX_PER_SEC) + 'px';
-    }
-    document.addEventListener('DOMContentLoaded', updateScrollTrack);
+    // Metadata
     vid.addEventListener('loadedmetadata', () => {
       const dur = isFinite(vid.duration) ? vid.duration : 0;
       if (dur > 0) {
         playStart = Math.max(0, Math.min(PLAY_START, dur));
         playEnd   = Math.max(playStart, Math.min(PLAY_END, dur));
       }
-      updateScrollTrack();
-      // ensure video matches current progress
       setProgress(progress);
     });
 
-    // If video moves (e.g., play, seek), broadcast new progress
+    // If video moves, update
     function computeProgressFromVideo() {
       if (!vid.duration) return progress;
       const start = Math.min(playStart, vid.duration);
@@ -136,7 +124,7 @@
       vid.addEventListener(ev, () => { setProgress(computeProgressFromVideo()); });
     });
 
-    // ===== Scrub bars (now set progress directly; no inner scroll) =====
+    // ===== Scrub bars (hover + drag) =====
     (function initScrubbers() {
       function wire(rootId) {
         const root = document.getElementById(rootId);
@@ -149,15 +137,21 @@
           return rect.width ? dx / rect.width : 0;
         }
 
-        function updateFill() {
-          if (fill) fill.style.width = (progress * 100).toFixed(3) + '%';
-          root.setAttribute('aria-valuenow', Math.round(progress * 100));
-        }
+        // Hover-to-scrub (no click required)
+        let raf = 0;
+        root.addEventListener('pointermove', (e) => {
+          if (raf) return;
+          raf = requestAnimationFrame(() => {
+            raf = 0;
+            setProgress(ratioFromClientX(e.clientX));
+          });
+        }, { passive: true });
 
+        // Drag-to-scrub (for touch & mouse)
         let dragging = false;
         root.addEventListener('pointerdown', (e) => {
           dragging = true;
-          root.setPointerCapture(e.pointerId);
+          root.setPointerCapture?.(e.pointerId);
           setProgress(ratioFromClientX(e.clientX));
         });
         root.addEventListener('pointermove', (e) => {
@@ -167,6 +161,7 @@
         root.addEventListener('pointerup',   () => { dragging = false; });
         root.addEventListener('pointercancel', () => { dragging = false; });
 
+        // Keyboard
         root.addEventListener('keydown', (e) => {
           let r = progress;
           const step = 0.05;
@@ -176,104 +171,77 @@
           if (e.key === 'End')  { setProgress(1); e.preventDefault(); }
         });
 
-        window.addEventListener('resize', updateFill);
-        updateFill();
+        // Keep fill width in sync on resize
+        window.addEventListener('resize', () => {
+          if (fill) fill.style.width = (progress * 100).toFixed(3) + '%';
+        });
       }
       wire('scrubber');
       wire('scrubber2');
     })();
 
-    // ===== Screen saver (idle after 1 minute; kept logic) =====
+    // ===== Screensaver / Intro gating =====
     (function initScreensaver(){
-      const IDLE_MS = 60_000; // re-show after idle
       const overlay = document.getElementById('screensaver');
-      const v1 = document.getElementById('ssv1'); // screensaver
-      const v2 = document.getElementById('ssv2'); // short intro
+      const v1 = document.getElementById('ssv1');
+      const v2 = document.getElementById('ssv2');
 
-      let accelerating = false;     // true after first interaction while overlay visible
-      let firstSequenceDone = false;
-      let idleTimer = null;
+      let accelerating = false;
 
-      function showOverlay(mode){
+      function showOverlay(){
         overlay.classList.add('is-visible');
         overlay.classList.remove('mode-intro');
-        // reset videos
         try { v2.pause(); v2.currentTime = 0; } catch(_) {}
         try { v1.pause(); } catch(_) {}
-        v1.playbackRate = 1;          // reset normal speed
-        v1.loop = true;                // loop until user interacts
+        v1.playbackRate = 1;
+        v1.loop = true;
         try { v1.play().catch(()=>{}); } catch(_) {}
         accelerating = false;
-        allowSync = false;             // ensure sync is OFF while overlay is up
+        allowSync = false; // block Wix sync while overlay visible
       }
       function hideOverlay(){
-        if (!overlay.classList.contains('is-visible')) return;
         overlay.classList.remove('is-visible');
         overlay.classList.remove('mode-intro');
         try { v1.pause(); } catch(_) {}
         try { v2.pause(); } catch(_) {}
       }
-      function scheduleIdle(){
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => showOverlay('idle'), IDLE_MS);
-      }
 
       function accelerateAndFinish(){
         if (!overlay.classList.contains('is-visible')) return;
-        if (accelerating) return; // already accelerating
+        if (accelerating) return;
         accelerating = true;
-        // Stop looping and speed up to finish
         v1.loop = false;
         v1.playbackRate = SCREENSAVER_ACCEL;
         try { v1.play().catch(()=>{}); } catch(_) {}
       }
 
-      // When v1 finishes (after accelerate), play v2; then hide
       v1.addEventListener('ended', () => {
         if (!overlay.classList.contains('is-visible')) return;
         if (accelerating) {
           overlay.classList.add('mode-intro');
           v2.playbackRate = 1.0;
           try { v2.play().catch(()=>{}); } catch(_) {}
-        } else {
-          // If it somehow ended without accelerate, restart (loop safeguard)
-          if (!v1.loop) { v1.loop = true; }
-          try { v1.play().catch(()=>{}); } catch(_) {}
         }
       });
 
-      // 👉 Enable syncing only when the intro finishes
+      // 👉 Enable Wix sync ONLY after the intro ends
       v2.addEventListener('ended', () => {
-        firstSequenceDone = true;
         hideOverlay();
-        allowSync = true;     // <-- sync now allowed
-        scheduleIdle();
+        allowSync = true; // now page scroll will follow progress
       });
 
-      // Any interaction ON the overlay triggers accelerate
       ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev => {
         overlay.addEventListener(ev, accelerateAndFinish, { passive: true });
       });
 
-      // Background activity while overlay hidden only extends idle timer
-      ['pointermove','pointerdown','touchstart','keydown','wheel','scroll'].forEach(ev => {
-        window.addEventListener(ev, () => { if (!overlay.classList.contains('is-visible')) scheduleIdle(); }, { passive: true });
-      });
-
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden) { hideOverlay(); clearTimeout(idleTimer); }
-        else { if (firstSequenceDone) scheduleIdle(); }
-      });
-
-      // Start with overlay visible and v1 playing
-      showOverlay('initial');
+      // Start with overlay visible
+      showOverlay();
     })();
   </script>
 
-  <!-- (Kept) Messaging helper consolidated above via sendProgressToParent() -->
+  <!-- Ensure no inner scrollbars in the iframe -->
   <style>
-    /* ensure no inner scrollbars (important for Wix iFrame) */
-    html, body { overflow: hidden; }
+    html, body { overflow: hidden; margin: 0; padding: 0; }
   </style>
 </body>
 </html>
