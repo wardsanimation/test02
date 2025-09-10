@@ -3,257 +3,74 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Direct Hover Scrub</title>
-  <link rel="stylesheet" href="main.css" />
+  <title>Scrub Sync Test</title>
   <style>
     html,body{overflow:hidden;margin:0;padding:0;background:#000}
-    /* ensure bars are always interactive and above the video */
+    video { width:100%; height:auto; display:block; }
     #scrubber, #scrubber2{
-      pointer-events:auto !important;
-      z-index:10000 !important;
-      cursor: ew-resize;
-      touch-action: none;
+      position:fixed; bottom:20px; left:10%; right:10%; height:20px;
+      background:rgba(255,0,0,0.2);
+      cursor: ew-resize; z-index:1000;
     }
-    /* when overlay is hidden, don't block events */
-    #screensaver:not(.is-visible){ pointer-events:none; }
+    #scrubber2 { bottom:60px; background:rgba(0,0,0,0); }
+    .scrubber__fill{height:100%;background:red;width:0%;}
   </style>
 </head>
 <body>
-  <!-- MAIN VIDEO -->
   <video id="v0" playsinline muted preload="auto">
     <source src="fingers.mp4" type="video/mp4" />
   </video>
 
-  <!-- Big invisible scrub bar (coarse) -->
-  <div id="scrubber2" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-    <div class="scrubber__fill" aria-hidden="true"></div>
-    <div class="scrubber__hint" aria-hidden="true">coarse</div>
-  </div>
-
-  <!-- Small visible red scrub bar (fine) -->
-  <div id="scrubber" role="slider" aria-label="fine scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-    <div class="scrubber__fill" aria-hidden="true"></div>
-    <div class="scrubber__hint" aria-hidden="true">scrub</div>
-  </div>
-
-  <!-- SCREEN SAVER / INTRO OVERLAY -->
-  <div id="screensaver" class="is-visible" aria-hidden="true">
-    <video id="ssv1" playsinline muted preload="auto" autoplay loop>
-      <source src="screensaver.mp4" type="video/mp4" />
-    </video>
-    <video id="ssv2" playsinline muted preload="auto">
-      <source src="intro.mp4" type="video/mp4" />
-    </video>
-  </div>
+  <div id="scrubber2"><div class="scrubber__fill"></div></div>
+  <div id="scrubber"><div class="scrubber__fill"></div></div>
 
   <script>
-    /************** Config **************/
-    const PLAY_START = 0;
-    const PLAY_END   = null;         // null = use full duration
-    const POST_TO_WIX_FPS = 12;      // limit parent messages
-    const SNAP_TO_FRAMES = false;
-    const FPS = 30;
-    const SCREENSAVER_ACCEL = 6.0;
-
-    /************** Elements **************/
     const vid = document.getElementById('v0');
-    const barFine   = document.getElementById('scrubber');
-    const barCoarse = document.getElementById('scrubber2');
-    const fillFine   = barFine.querySelector('.scrubber__fill');
-    const fillCoarse = barCoarse.querySelector('.scrubber__fill');
-
-    const overlay = document.getElementById('screensaver');
-    const v1 = document.getElementById('ssv1'); // screensaver loop
-    const v2 = document.getElementById('ssv2'); // intro
-
-    /************** State **************/
-    let allowSync = false;     // parent scroll only after intro ends
-    let playStart = PLAY_START;
-    let playEnd   = PLAY_END;  // null until we know duration
-    let lastWixSent = 0;
+    const bar1 = document.getElementById('scrubber');
+    const bar2 = document.getElementById('scrubber2');
+    const fill1 = bar1.querySelector('.scrubber__fill');
+    const fill2 = bar2.querySelector('.scrubber__fill');
 
     const clamp01 = v => Math.max(0, Math.min(1, v||0));
 
-    /************** Helpers for robust postMessage **************/
-    function sendToParent(obj){
-      try {
-        parent.postMessage(JSON.stringify(obj), '*');
-      } catch(_) {
-        try { parent.postMessage(obj, '*'); } catch(_) {}
-      }
-    }
-    function safeParse(data){
-      if (typeof data === 'string') {
-        try { return JSON.parse(data); } catch(_) { return {}; }
-      }
-      return data || {};
+    function send(p){
+      parent.postMessage(JSON.stringify({type:'videoProgress', value:p}), '*');
     }
 
-    /************** Core: ratio -> time, seek, update bars, maybe post to Wix **************/
-    function ratioToTime(r){
-      if (!isFinite(vid.duration) || vid.duration <= 0) return 0;
-      const start = Math.max(0, Math.min(playStart, vid.duration));
-      const end   = (playEnd == null) ? vid.duration : Math.min(playEnd, vid.duration);
-      const span  = Math.max(0, end - start);
-      let t = start + clamp01(r) * span;
-      if (SNAP_TO_FRAMES && FPS > 0) t = Math.round(t * FPS) / FPS;
-      return t;
-    }
     function setByRatio(r){
-      const t = ratioToTime(r);
-      if (!isFinite(t)) return;
-
-      // direct seek for immediate response
-      vid.currentTime = t;
-
-      // update fills
-      const endForP = (playEnd==null ? (vid.duration||1) : playEnd);
-      const p = clamp01((t - (playStart || 0)) / ((endForP) - (playStart||0) || 1));
-      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3)+'%';
-      if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3)+'%';
-      barFine.setAttribute('aria-valuenow', Math.round(p*100));
-      barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
-
-      // always send progress (parent ignores while locked)
-      const now = performance.now();
-      const minGap = 1000 / POST_TO_WIX_FPS;
-      if (now - lastWixSent >= minGap) {
-        lastWixSent = now;
-        sendToParent({ type:'videoProgress', value: p });
-      }
-    }
-
-    /************** Hover & Drag wiring (TRUE hover: no click needed) **************/
-    function ratioFromClientX(root, x){
-      const rect = root.getBoundingClientRect();
-      const dx = Math.min(Math.max(0, x - rect.left), rect.width);
-      return rect.width ? (dx / rect.width) : 0;
-    }
-    function inside(root, x, y){
-      const r = root.getBoundingClientRect();
-      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-    }
-
-    // update immediately on entering either bar
-    [barFine, barCoarse].forEach(root=>{
-      root.addEventListener('pointerenter', e => setByRatio(ratioFromClientX(root, e.clientX)));
-      root.addEventListener('mouseenter',   e => setByRatio(ratioFromClientX(root, e.clientX)));
-    });
-
-    // global move: if we're over a bar, update continuously
-    function onMove(e){
-      const { clientX:x, clientY:y } = e;
-      if (inside(barFine, x, y))   { setByRatio(ratioFromClientX(barFine,   x)); return; }
-      if (inside(barCoarse, x, y)) { setByRatio(ratioFromClientX(barCoarse, x)); return; }
-    }
-    window.addEventListener('mousemove', onMove, { passive:true });
-    window.addEventListener('pointermove', onMove, { passive:true });
-
-    // drag (nice for touch/mouse)
-    [barFine, barCoarse].forEach(root=>{
-      let dragging = false;
-      root.addEventListener('pointerdown', e=>{ dragging=true; root.setPointerCapture?.(e.pointerId); setByRatio(ratioFromClientX(root, e.clientX)); });
-      root.addEventListener('pointermove', e=>{ if(dragging) setByRatio(ratioFromClientX(root, e.clientX)); });
-      root.addEventListener('pointerup',   ()=> dragging=false);
-      root.addEventListener('pointercancel',()=> dragging=false);
-
-      // keyboard
-      root.addEventListener('keydown', e=>{
-        const step = 0.05;
-        const dur = vid.duration || 1;
-        const curP = clamp01( vid.currentTime / dur );
-        if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   { setByRatio(curP + step); e.preventDefault(); }
-        if (e.key === 'ArrowLeft'  || e.key === 'ArrowDown') { setByRatio(curP - step); e.preventDefault(); }
-        if (e.key === 'Home') { setByRatio(0); e.preventDefault(); }
-        if (e.key === 'End')  { setByRatio(1); e.preventDefault(); }
-      });
-    });
-
-    /************** Metadata **************/
-    vid.addEventListener('loadedmetadata', ()=>{
-      const dur = isFinite(vid.duration) ? vid.duration : 0;
-      if (dur > 0) {
-        playStart = Math.max(0, Math.min(PLAY_START, dur));
-        playEnd   = (PLAY_END == null) ? dur : Math.max(playStart, Math.min(PLAY_END, dur));
-      }
-      setByRatio( (vid.currentTime && dur) ? (vid.currentTime / dur) : 0 );
-    });
-
-    /************** Keep fills aligned if the video changes otherwise **************/
-    function updateFillsFromVideo(){
       if (!vid.duration) return;
-      const p = clamp01( vid.currentTime / vid.duration );
-      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3)+'%';
-      if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3)+'%';
-      barFine.setAttribute('aria-valuenow', Math.round(p*100));
-      barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
+      const t = clamp01(r) * vid.duration;
+      vid.currentTime = t;
+      fill1.style.width = (r*100)+'%';
+      fill2.style.width = (r*100)+'%';
+      send(r);
     }
-    ['timeupdate','seeking','seeked','play','pause'].forEach(ev=>{
-      vid.addEventListener(ev, updateFillsFromVideo);
-    });
 
-    /************** Parent (Wix) → Child: receive page scroll progress **************/
-    window.addEventListener('message', (evt) => {
-      const msg = safeParse(evt.data);
-      if (msg.type === 'scrollProgress') {
-        const p = clamp01(Number(msg.value) || 0);
-        setByRatio(p); // map page scroll (0..1) → video/bars
+    function ratioFromX(root,x){
+      const rect=root.getBoundingClientRect();
+      const dx=Math.min(Math.max(0,x-rect.left),rect.width);
+      return rect.width?dx/rect.width:0;
+    }
+
+    function onMove(e){
+      const x=e.clientX,y=e.clientY;
+      [bar1,bar2].forEach(bar=>{
+        const r=bar.getBoundingClientRect();
+        if(x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom){
+          setByRatio(ratioFromX(bar,x));
+        }
+      });
+    }
+    window.addEventListener('mousemove',onMove);
+
+    // Listen from Wix
+    window.addEventListener('message',evt=>{
+      let msg={};
+      try{msg=JSON.parse(evt.data);}catch{msg=evt.data||{};}
+      if(msg.type==='scrollProgress'){
+        setByRatio(clamp01(msg.value));
       }
     });
-
-    /************** Overlay / Intro gating + LOCK/UNLOCK page scroll **************/
-    let accelerating = false;
-
-    function showOverlay(){
-      overlay.classList.add('is-visible');
-      overlay.classList.remove('mode-intro');
-      try { v2.pause(); v2.currentTime = 0; } catch(_) {}
-      try { v1.pause(); } catch(_) {}
-      v1.playbackRate = 1;
-      v1.loop = true;
-      try { v1.play().catch(()=>{}); } catch(_) {}
-      accelerating = false;
-      allowSync = false; // (parent still receives progress but ignores while locked)
-      // LOCK page scroll in Wix
-      sendToParent({ type: 'lockScroll', value: true });
-    }
-    function hideOverlay(){
-      overlay.classList.remove('is-visible');
-      overlay.classList.remove('mode-intro');
-      try { v1.pause(); } catch(_) {}
-      try { v2.pause(); } catch(_) {}
-      // UNLOCK page scroll in Wix
-      sendToParent({ type: 'lockScroll', value: false });
-    }
-    function accelerateAndFinish(){
-      if (!overlay.classList.contains('is-visible')) return;
-      if (accelerating) return;
-      accelerating = true;
-      v1.loop = false;
-      v1.playbackRate = SCREENSAVER_ACCEL;
-      try { v1.play().catch(()=>{}); } catch(_) {}
-    }
-
-    // After screensaver ends, play intro
-    v1.addEventListener('ended', ()=>{
-      if (!overlay.classList.contains('is-visible')) return;
-      overlay.classList.add('mode-intro');
-      try { v2.play().catch(()=>{}); } catch(_) {}
-    });
-
-    // After intro ends, hide overlay and allow parent to react to progress
-    v2.addEventListener('ended', ()=>{
-      hideOverlay();
-      allowSync = true;
-    });
-
-    // Any interaction on overlay accelerates screensaver
-    ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev=>{
-      overlay.addEventListener(ev, accelerateAndFinish, { passive:true });
-    });
-
-    // Start with overlay visible (and page scroll locked)
-    showOverlay();
   </script>
 </body>
 </html>
