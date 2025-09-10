@@ -1,0 +1,266 @@
+```html
+# /index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scroll → Video with Dual Scrub Bars</title>
+  <link rel="stylesheet" href="main.css" />
+</head>
+<body>
+  <div id="set-height"></div>
+
+  <video id="v0" playsinline muted preload>
+    <source src="fingers.mp4" type="video/mp4" />
+  </video>
+
+  <!-- Big invisible scrub bar (coarse control) -->
+  <div id="scrubber2" role="slider" aria-label="Scroll scrubber (coarse)" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="scrubber__fill" aria-hidden="true"></div>
+    <div class="scrubber__hint" aria-hidden="true">coarse</div>
+  </div>
+
+  <!-- Small visible scrub bar (fine control) -->
+  <div id="scrubber" role="slider" aria-label="Scroll scrubber" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="scrubber__fill" aria-hidden="true"></div>
+    <div class="scrubber__hint" aria-hidden="true">scrub</div>
+  </div>
+  <!-- Screen saver overlay (starts visible on load) -->
+  <div id="screensaver" aria-hidden="true">
+    <video id="ssv1" playsinline muted preload="auto" autoplay loop>
+      <source src="screensaver.mp4" type="video/mp4" />
+    </video>
+    <video id="ssv2" playsinline muted preload="auto">
+      <source src="intro.mp4" type="video/mp4" />
+    </video>
+  </div>
+
+  <script>
+    // ===== Config =====
+    const SCROLL_PX_PER_SEC = 600; // page height per second in the play window
+    const PLAY_START = 0;          // seconds
+    const PLAY_END   = 17;         // seconds
+
+    // ==== Smoothness & seeking knobs ====
+    const SNAP_TO_FRAMES   = true;   // snap seeks to exact frame boundaries
+    const FPS              = 30;     // set to your source fps (e.g., 25 or 30)
+    const USE_FASTSEEK     = true;   // prefer HTMLMediaElement.fastSeek when available
+    const SMOOTH_TAU_MS    = 220;    // lower = snappier, higher = smoother
+
+    // Screensaver accel factor on interaction
+    const SCREENSAVER_ACCEL = 6.0;
+
+    const track = document.getElementById('set-height');
+    const vid = document.getElementById('v0');
+
+    let playStart = PLAY_START;
+    let playEnd = PLAY_END;
+
+    function getScrollMax() {
+      return Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    }
+
+    function updateScrollTrack() {
+      const seconds = Math.max(0.1, (playEnd - playStart) || (PLAY_END - PLAY_START) || 1);
+      track.style.height = Math.round(seconds * SCROLL_PX_PER_SEC) + 'px';
+    }
+
+    // Create a track immediately so scrolling works before metadata
+    document.addEventListener('DOMContentLoaded', updateScrollTrack);
+
+    // Clamp play window once metadata is ready
+    vid.addEventListener('loadedmetadata', () => {
+      const dur = isFinite(vid.duration) ? vid.duration : 0;
+      if (dur > 0) {
+        playStart = Math.max(0, Math.min(PLAY_START, dur));
+        playEnd   = Math.max(playStart, Math.min(PLAY_END, dur));
+      }
+      updateScrollTrack();
+    });
+
+    // RAF loop: map scroll ratio → currentTime in [playStart, playEnd]
+    (function tick(ts){
+      const max = getScrollMax();
+      let targetR = max > 0 ? (window.pageYOffset / max) : 0;
+      if (targetR < 0) targetR = 0; else if (targetR > 1) targetR = 1;
+
+      // time-based exponential smoothing
+      window.__cc_lastTs = window.__cc_lastTs || ts || performance.now();
+      const now = ts || performance.now();
+      const dt = Math.max(0, now - window.__cc_lastTs);
+      window.__cc_lastTs = now;
+      const alpha = 1 - Math.exp(-dt / SMOOTH_TAU_MS);
+      window.__cc_displayR = window.__cc_displayR ?? targetR;
+      window.__cc_displayR += (targetR - window.__cc_displayR) * alpha;
+
+      if (isFinite(vid.duration) && vid.duration > 0) {
+        const start = Math.min(playStart, vid.duration);
+        const end   = Math.min(playEnd, vid.duration);
+        let t = start + window.__cc_displayR * Math.max(0, end - start);
+        if (SNAP_TO_FRAMES && FPS > 0) { t = Math.round(t * FPS) / FPS; }
+        if (USE_FASTSEEK && typeof vid.fastSeek === 'function') {
+          try { vid.fastSeek(t); } catch(_) { vid.currentTime = t; }
+        } else {
+          vid.currentTime = t;
+        }
+      }
+      requestAnimationFrame(tick);
+    })(0);
+
+    // ===== Scrub bars (both map horizontal position → page scroll) =====
+    (function initScrubbers() {
+      function createScrubber(root) {
+        const fill = root.querySelector('.scrubber__fill');
+        let wasInside = false;
+        let tween = null;
+
+        function cancelTween() {
+          if (tween) { cancelAnimationFrame(tween.raf); tween = null; }
+        }
+        function ratioFromClientX(x) {
+          const rect = root.getBoundingClientRect();
+          const dx = Math.min(Math.max(0, x - rect.left), rect.width);
+          return rect.width ? dx / rect.width : 0;
+        }
+        function updateFillFromScroll() {
+          const max = getScrollMax();
+          let r = max === 0 ? 0 : window.pageYOffset / max;
+          if (r < 0) r = 0; else if (r > 1) r = 1;
+          if (fill) fill.style.width = (r * 100).toFixed(3) + '%';
+          root.setAttribute('aria-valuenow', Math.round(r * 100));
+        }
+        function ease(t){ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }
+        function smoothScrollTo(targetY) {
+          const max = getScrollMax();
+          targetY = Math.max(0, Math.min(targetY, max));
+          const startY = window.pageYOffset || document.documentElement.scrollTop || 0;
+          const dist = targetY - startY;
+          if (Math.abs(dist) < 1) { window.scrollTo({ top: targetY, behavior: 'auto' }); return; }
+          const dur = Math.min(1200, Math.max(250, 300 + Math.abs(dist) * 0.35));
+          cancelTween();
+          let t0 = null;
+          function step(ts){ if(!t0) t0 = ts; const p = Math.min(1, (ts - t0)/dur); window.scrollTo(0, startY + dist * ease(p)); if (p < 1 && tween) tween.raf = requestAnimationFrame(step); else tween = null; }
+          tween = { raf: requestAnimationFrame(step) };
+        }
+        function setScrollByRatio(r, smooth){ const y = r * getScrollMax(); if (smooth) smoothScrollTo(y); else { cancelTween(); window.scrollTo({ top: y, behavior: 'auto' }); } }
+
+        function onPointerMove(e) {
+          const rect = root.getBoundingClientRect();
+          const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+          if (inside) {
+            const r = ratioFromClientX(e.clientX);
+            const currentR = getScrollMax() === 0 ? 0 : window.pageYOffset / getScrollMax();
+            setScrollByRatio(r, false);
+          }
+          wasInside = inside;
+        }
+
+        function onKeyDown(e) {
+          let r = getScrollMax() === 0 ? 0 : window.pageYOffset / getScrollMax();
+          const step = 0.05;
+          if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { r = Math.min(1, r + step); setScrollByRatio(r, true); e.preventDefault(); }
+          else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { r = Math.max(0, r - step); setScrollByRatio(r, true); e.preventDefault(); }
+          else if (e.key === 'Home') { setScrollByRatio(0, true); e.preventDefault(); }
+          else if (e.key === 'End') { setScrollByRatio(1, true); e.preventDefault(); }
+        }
+
+        window.addEventListener('scroll', updateFillFromScroll, { passive: true });
+        window.addEventListener('resize', updateFillFromScroll);
+        window.addEventListener('wheel', cancelTween, { passive: true });
+        window.addEventListener('keydown', cancelTween);
+        window.addEventListener('pointermove', onPointerMove, { passive: true });
+        root.addEventListener('keydown', onKeyDown);
+        updateFillFromScroll();
+      }
+
+      createScrubber(document.getElementById('scrubber'));
+      createScrubber(document.getElementById('scrubber2'));
+    })();
+
+    // ===== Screen saver (idle after 1 minute) =====
+    (function initScreensaver(){
+      const IDLE_MS = 60_000; // re-show after idle
+      const overlay = document.getElementById('screensaver');
+      const v1 = document.getElementById('ssv1'); // screensaver
+      const v2 = document.getElementById('ssv2'); // short intro
+
+      let accelerating = false;     // true after first interaction while overlay visible
+      let firstSequenceDone = false;
+      let idleTimer = null;
+
+      function showOverlay(mode){
+        overlay.classList.add('is-visible');
+        overlay.classList.remove('mode-intro');
+        // reset videos
+        try { v2.pause(); v2.currentTime = 0; } catch(_) {}
+        try { v1.pause(); } catch(_) {}
+        v1.playbackRate = 1;          // reset normal speed
+        v1.loop = true;                // loop until user interacts
+        try { v1.play().catch(()=>{}); } catch(_) {}
+        accelerating = false;
+      }
+      function hideOverlay(){
+        if (!overlay.classList.contains('is-visible')) return;
+        overlay.classList.remove('is-visible');
+        overlay.classList.remove('mode-intro');
+        try { v1.pause(); } catch(_) {}
+        try { v2.pause(); } catch(_) {}
+      }
+      function scheduleIdle(){
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => showOverlay('idle'), IDLE_MS);
+      }
+
+      function accelerateAndFinish(){
+        if (!overlay.classList.contains('is-visible')) return;
+        if (accelerating) return; // already accelerating
+        accelerating = true;
+        // Stop looping and speed up to finish
+        v1.loop = false;
+        v1.playbackRate = SCREENSAVER_ACCEL;
+        try { v1.play().catch(()=>{}); } catch(_) {}
+      }
+
+      // When v1 finishes (after accelerate), play v2; then hide
+      v1.addEventListener('ended', () => {
+        if (!overlay.classList.contains('is-visible')) return;
+        if (accelerating) {
+          overlay.classList.add('mode-intro');
+          v2.playbackRate = 1.0;
+          try { v2.play().catch(()=>{}); } catch(_) {}
+        } else {
+          // If it somehow ended without accelerate, restart (loop safeguard)
+          if (!v1.loop) { v1.loop = true; }
+          try { v1.play().catch(()=>{}); } catch(_) {}
+        }
+      });
+
+      v2.addEventListener('ended', () => {
+        firstSequenceDone = true;
+        hideOverlay();
+        scheduleIdle();
+      });
+
+      // Any interaction ON the overlay triggers accelerate
+      ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev => {
+        overlay.addEventListener(ev, accelerateAndFinish, { passive: true });
+      });
+
+      // Background activity while overlay hidden only extends idle timer
+      ['pointermove','pointerdown','touchstart','keydown','wheel','scroll'].forEach(ev => {
+        window.addEventListener(ev, () => { if (!overlay.classList.contains('is-visible')) scheduleIdle(); }, { passive: true });
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { hideOverlay(); clearTimeout(idleTimer); }
+        else { if (firstSequenceDone) scheduleIdle(); }
+      });
+
+      // Start with overlay visible and v1 playing
+      showOverlay('initial');
+    })();
+  </script>
+</body>
+</html>
+
