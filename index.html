@@ -3,18 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scrub ↔ Page Sync (0..1)</title>
+  <title>Scrub ↔ Page Sync (with Intro)</title>
   <link rel="stylesheet" href="main.css" />
   <style>
     html,body{overflow:hidden;margin:0;padding:0;background:#000}
-    /* Ensure bars sit above the video and get pointer events */
+    /* Make sure bars are interactive and above the video */
     #scrubber, #scrubber2{
       pointer-events:auto !important;
       z-index:10000 !important;
       cursor: ew-resize;
       touch-action: none;
     }
-    /* If you still use the overlay, this prevents it from blocking when hidden */
+    /* Overlay should block clicks while visible; when hidden allow events through */
+    #screensaver.is-visible { pointer-events:auto; }
     #screensaver:not(.is-visible){ pointer-events:none; }
   </style>
 </head>
@@ -25,19 +26,19 @@
   </video>
 
   <!-- Big invisible scrub bar (coarse) -->
-  <div id="scrubber2" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-    <div class="scrubber__fill" aria-hidden="true"></div>
-    <div class="scrubber__hint" aria-hidden="true">coarse</div>
-  </div>
-
-  <!-- Small visible red scrub bar (fine) -->
   <div id="scrubber" role="slider" aria-label="fine scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
     <div class="scrubber__fill" aria-hidden="true"></div>
     <div class="scrubber__hint" aria-hidden="true">scrub</div>
   </div>
 
-  <!-- (Optional) screensaver/intro overlay you were using -->
-  <div id="screensaver" class="is-visible" aria-hidden="true" style="display:none"><!-- disable for now -->
+  <!-- Small visible red scrub bar (fine) -->
+  <div id="scrubber2" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="scrubber__fill" aria-hidden="true"></div>
+    <div class="scrubber__hint" aria-hidden="true">coarse</div>
+  </div>
+
+  <!-- SCREEN SAVER / INTRO OVERLAY (VISIBLE ON LOAD) -->
+  <div id="screensaver" class="is-visible" aria-hidden="false">
     <video id="ssv1" playsinline muted preload="auto" autoplay loop>
       <source src="screensaver.mp4" type="video/mp4" />
     </video>
@@ -49,27 +50,37 @@
   <script>
     /************** Config **************/
     const PLAY_START = 0;
-    const PLAY_END   = null;     // null = full duration
+    const PLAY_END   = null;   // null = full duration
     const SNAP_TO_FRAMES = false;
     const FPS = 30;
 
-    // throttle how often we send values to Wix (ms)
+    // throttle messages to Wix (ms)
     const SEND_INTERVAL_MS = 50; // ~20 msgs/sec
+
+    // screensaver accel
+    const SCREENSAVER_ACCEL = 6.0;
 
     /************** Elements **************/
     const vid = document.getElementById('v0');
+    // NOTE: I’m keeping your original naming but swapping visual roles:
+    // #scrubber = fine (top), #scrubber2 = coarse (bottom). If that’s flipped on your CSS, it’s fine.
     const barFine   = document.getElementById('scrubber');
     const barCoarse = document.getElementById('scrubber2');
     const fillFine   = barFine.querySelector('.scrubber__fill');
     const fillCoarse = barCoarse.querySelector('.scrubber__fill');
 
+    const overlay = document.getElementById('screensaver');
+    const v1 = document.getElementById('ssv1'); // screensaver loop
+    const v2 = document.getElementById('ssv2'); // intro
+
     /************** State **************/
     let playStart = PLAY_START;
-    let playEnd   = PLAY_END;  // becomes duration after metadata
+    let playEnd   = PLAY_END;     // becomes duration after metadata
     let lastSentAt = 0;
-    let muteSend = false; // prevents feedback loop when applying parent updates
+    let allowSync = false;        // parent can react to scrubValue only after intro
+    let applyingFromParent = false; // prevent echo on parent→child updates
 
-    const clamp01 = v => Math.max(0, Math.min(1, v||0));
+    const clamp01 = v => Math.max(0, Math.min(1, Number(v)||0));
 
     /************** Messaging helpers **************/
     function sendToParent(obj){
@@ -99,7 +110,7 @@
       const t = ratioToTime(r);
       vid.currentTime = t;
 
-      // Calculate normalized progress p (0..1) within the active window
+      // p = 0..1 progress within active window
       const endForP = (playEnd==null ? (vid.duration||1) : playEnd);
       const p = clamp01((t - (playStart || 0)) / ((endForP) - (playStart||0) || 1));
 
@@ -109,12 +120,12 @@
       barFine.setAttribute('aria-valuenow',   Math.round(p*100));
       barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
 
-      // Send to Wix unless this came from Wix
-      if (!fromParent) {
+      // Send to Wix (only after intro), and not if this came from Wix
+      if (!fromParent && allowSync) {
         const now = performance.now();
         if (now - lastSentAt >= SEND_INTERVAL_MS) {
           lastSentAt = now;
-          sendToParent({ type:'scrubValue', value:p }); // <-- 0..1 continuous
+          sendToParent({ type:'scrubValue', value:p }); // 0..1 precise
         }
       }
     }
@@ -145,7 +156,7 @@
     window.addEventListener('mousemove', onMove, { passive:true });
     window.addEventListener('pointermove', onMove, { passive:true });
 
-    // Drag (helpful for touch/mouse)
+    // Drag (touch/mouse)
     [barFine, barCoarse].forEach(root=>{
       let dragging = false;
       root.addEventListener('pointerdown', e=>{ dragging=true; root.setPointerCapture?.(e.pointerId); setByRatio(ratioFromClientX(root, e.clientX)); });
@@ -182,12 +193,68 @@
       const msg = parseMsg(evt.data);
       if (msg.type === 'scrollValue') {
         const p = clamp01(Number(msg.value) || 0);
-        muteSend = true;          // avoid echoing straight back
+        applyingFromParent = true;
         setByRatio(p, {fromParent:true});
-        // allow next outbound send after a tick
-        setTimeout(()=>{ muteSend = false; }, SEND_INTERVAL_MS);
+        // small delay to avoid echo
+        setTimeout(()=>{ applyingFromParent = false; }, SEND_INTERVAL_MS);
       }
     });
+
+    /************** Overlay / Intro logic (VISIBLE) **************/
+    let accelerating = false;
+
+    function showOverlay(){
+      overlay.classList.add('is-visible');
+      overlay.setAttribute('aria-hidden','false');
+      overlay.classList.remove('mode-intro');
+      try { v2.pause(); v2.currentTime = 0; } catch(_) {}
+      try { v1.pause(); } catch(_) {}
+      v1.playbackRate = 1;
+      v1.loop = true;
+      try { v1.play().catch(()=>{}); } catch(_) {}
+
+      allowSync = false; // parent should ignore scrub until intro done
+      // Hint to parent (optional; safe if ignored)
+      sendToParent({ type: 'lockScroll', value: true });
+    }
+    function hideOverlay(){
+      overlay.classList.remove('is-visible');
+      overlay.setAttribute('aria-hidden','true');
+      overlay.classList.remove('mode-intro');
+      try { v1.pause(); } catch(_) {}
+      try { v2.pause(); } catch(_) {}
+      // Allow sync now
+      allowSync = true;
+      sendToParent({ type: 'lockScroll', value: false }); // optional
+    }
+    function accelerateAndFinish(){
+      if (!overlay.classList.contains('is-visible')) return;
+      if (accelerating) return;
+      accelerating = true;
+      v1.loop = false;
+      v1.playbackRate = SCREENSAVER_ACCEL;
+      try { v1.play().catch(()=>{}); } catch(_) {}
+    }
+
+    // After screensaver ends, play intro
+    v1.addEventListener('ended', ()=>{
+      if (!overlay.classList.contains('is-visible')) return;
+      overlay.classList.add('mode-intro');
+      try { v2.play().catch(()=>{}); } catch(_) {}
+    });
+
+    // After intro ends, hide overlay and enable sync
+    v2.addEventListener('ended', ()=>{
+      hideOverlay();
+    });
+
+    // Any interaction on overlay accelerates screensaver
+    ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev=>{
+      overlay.addEventListener(ev, accelerateAndFinish, { passive:true });
+    });
+
+    // Start with overlay visible
+    showOverlay();
   </script>
 </body>
 </html>
