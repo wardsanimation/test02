@@ -48,16 +48,14 @@
 
   <script>
     /************** Config you can tweak **************/
-    // Use the FULL video by default. If you ever want a window, set PLAY_END to a number of seconds.
     const PLAY_START = 0;            // seconds
-    const PLAY_END   = null;         // null = use full duration. Set to a number to limit.
-    const POST_TO_WIX_FPS = 12;      // how often we notify Wix (caps messages)
+    const PLAY_END   = null;         // null = use full duration
+    const POST_TO_WIX_FPS = 12;      // notify Wix at most 12x/sec
 
-    // keep simple + precise: no frame snapping, no smoothing
-    const SNAP_TO_FRAMES = false;    // set true + FPS if you *want* snapping
+    // keep simple + precise
+    const SNAP_TO_FRAMES = false;    // set true + FPS if you want snapping
     const FPS            = 30;       // only used if SNAP_TO_FRAMES = true
 
-    // intro/saver
     const SCREENSAVER_ACCEL = 6.0;
 
     /************** Elements **************/
@@ -67,19 +65,18 @@
     const fillFine   = barFine.querySelector('.scrubber__fill');
     const fillCoarse = barCoarse.querySelector('.scrubber__fill');
 
-    // overlay videos
     const overlay = document.getElementById('screensaver');
     const v1 = document.getElementById('ssv1'); // screensaver loop
-    const v2 = document.getElementById('ssv2'); // short intro
+    const v2 = document.getElementById('ssv2'); // intro
 
     /************** State **************/
-    let allowSync = false; // only post to Wix after intro ends
+    let allowSync = false; // post to Wix only after intro ends
     let playStart = PLAY_START;
     let playEnd   = PLAY_END; // null until we know duration
 
     const clamp01 = v => Math.max(0, Math.min(1, v||0));
 
-    /************** Core: map ratio -> time, seek video, update bars, maybe post to Wix **************/
+    /************** Core: ratio -> time, seek, update bars, maybe post to Wix **************/
     let lastWixSent = 0;
     function ratioToTime(r){
       if (!isFinite(vid.duration) || vid.duration <= 0) return 0;
@@ -92,24 +89,26 @@
     }
     function setByRatio(r){
       const t = ratioToTime(r);
-      if (isFinite(t)) {
-        // direct seek for immediate response
-        vid.currentTime = t;
-        // fills
-        const p = clamp01((t - (playStart || 0)) / ( (playEnd==null ? (vid.duration||1) : playEnd) - (playStart||0) || 1 ));
-        if (fillFine)   fillFine.style.width   = (p*100).toFixed(3)+'%';
-        if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3)+'%';
-        barFine.setAttribute('aria-valuenow', Math.round(p*100));
-        barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
+      if (!isFinite(t)) return;
 
-        // notify Wix at limited rate
-        if (allowSync) {
-          const now = performance.now();
-          const minGap = 1000 / POST_TO_WIX_FPS;
-          if (now - lastWixSent >= minGap) {
-            lastWixSent = now;
-            parent.postMessage({ type:'videoProgress', value: p }, '*');
-          }
+      // direct seek for immediate response
+      vid.currentTime = t;
+
+      // update fills
+      const endForP = (playEnd==null ? (vid.duration||1) : playEnd);
+      const p = clamp01((t - (playStart || 0)) / ((endForP) - (playStart||0) || 1));
+      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3)+'%';
+      if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3)+'%';
+      barFine.setAttribute('aria-valuenow', Math.round(p*100));
+      barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
+
+      // notify Wix (after intro only)
+      if (allowSync) {
+        const now = performance.now();
+        const minGap = 1000 / POST_TO_WIX_FPS;
+        if (now - lastWixSent >= minGap) {
+          lastWixSent = now;
+          parent.postMessage({ type:'videoProgress', value: p }, '*');
         }
       }
     }
@@ -151,7 +150,8 @@
       // keyboard
       root.addEventListener('keydown', e=>{
         const step = 0.05;
-        const curP = clamp01( vid.duration ? (vid.currentTime / vid.duration) : 0 );
+        const dur = vid.duration || 1;
+        const curP = clamp01( vid.currentTime / dur );
         if (e.key === 'ArrowRight' || e.key === 'ArrowUp')   { setByRatio(curP + step); e.preventDefault(); }
         if (e.key === 'ArrowLeft'  || e.key === 'ArrowDown') { setByRatio(curP - step); e.preventDefault(); }
         if (e.key === 'Home') { setByRatio(0); e.preventDefault(); }
@@ -159,7 +159,7 @@
       });
     });
 
-    /************** Metadata: clamp window (and use full duration if PLAY_END is null) **************/
+    /************** Metadata: set duration window **************/
     vid.addEventListener('loadedmetadata', ()=>{
       const dur = isFinite(vid.duration) ? vid.duration : 0;
       if (dur > 0) {
@@ -183,7 +183,16 @@
       vid.addEventListener(ev, updateFillsFromVideo);
     });
 
-    /************** Overlay / Intro gating **************/
+    /************** Parent (Wix) → Child: receive page scroll progress **************/
+    window.addEventListener('message', (evt) => {
+      const msg = evt.data || {};
+      if (msg.type === 'scrollProgress') {
+        const p = clamp01(Number(msg.value) || 0);
+        setByRatio(p); // map page scroll (0..1) → video/bars
+      }
+    });
+
+    /************** Overlay / Intro gating + LOCK/UNLOCK page scroll **************/
     let accelerating = false;
 
     function showOverlay(){
@@ -196,12 +205,16 @@
       try { v1.play().catch(()=>{}); } catch(_) {}
       accelerating = false;
       allowSync = false; // block Wix sync while overlay shown
+      // 👉 LOCK page scroll in Wix
+      parent.postMessage({ type: 'lockScroll', value: true }, '*');
     }
     function hideOverlay(){
       overlay.classList.remove('is-visible');
       overlay.classList.remove('mode-intro');
       try { v1.pause(); } catch(_) {}
       try { v2.pause(); } catch(_) {}
+      // 👉 UNLOCK page scroll in Wix
+      parent.postMessage({ type: 'lockScroll', value: false }, '*');
     }
     function accelerateAndFinish(){
       if (!overlay.classList.contains('is-visible')) return;
@@ -221,8 +234,8 @@
 
     // After intro ends, hide overlay and allow Wix sync
     v2.addEventListener('ended', ()=>{
-      hideOverlay();
-      allowSync = true;
+      hideOverlay();        // also unlocks Wix scroll
+      allowSync = true;     // bars now also scroll the Wix page
     });
 
     // Any interaction on overlay accelerates screensaver
@@ -230,7 +243,7 @@
       overlay.addEventListener(ev, accelerateAndFinish, { passive:true });
     });
 
-    // Start with overlay visible
+    // Start with overlay visible (and page scroll locked)
     showOverlay();
   </script>
 </body>
