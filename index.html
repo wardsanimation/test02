@@ -47,15 +47,12 @@
   </div>
 
   <script>
-    /************** Config you can tweak **************/
-    const PLAY_START = 0;            // seconds
+    /************** Config **************/
+    const PLAY_START = 0;
     const PLAY_END   = null;         // null = use full duration
-    const POST_TO_WIX_FPS = 12;      // notify Wix at most 12x/sec
-
-    // keep simple + precise
-    const SNAP_TO_FRAMES = false;    // set true + FPS if you want snapping
-    const FPS            = 30;       // only used if SNAP_TO_FRAMES = true
-
+    const POST_TO_WIX_FPS = 12;      // limit parent messages
+    const SNAP_TO_FRAMES = false;
+    const FPS = 30;
     const SCREENSAVER_ACCEL = 6.0;
 
     /************** Elements **************/
@@ -70,14 +67,29 @@
     const v2 = document.getElementById('ssv2'); // intro
 
     /************** State **************/
-    let allowSync = false; // post to Wix only after intro ends
+    let allowSync = false;     // parent scroll only after intro ends
     let playStart = PLAY_START;
-    let playEnd   = PLAY_END; // null until we know duration
+    let playEnd   = PLAY_END;  // null until we know duration
+    let lastWixSent = 0;
 
     const clamp01 = v => Math.max(0, Math.min(1, v||0));
 
+    /************** Helpers for robust postMessage **************/
+    function sendToParent(obj){
+      try {
+        parent.postMessage(JSON.stringify(obj), '*');
+      } catch(_) {
+        try { parent.postMessage(obj, '*'); } catch(_) {}
+      }
+    }
+    function safeParse(data){
+      if (typeof data === 'string') {
+        try { return JSON.parse(data); } catch(_) { return {}; }
+      }
+      return data || {};
+    }
+
     /************** Core: ratio -> time, seek, update bars, maybe post to Wix **************/
-    let lastWixSent = 0;
     function ratioToTime(r){
       if (!isFinite(vid.duration) || vid.duration <= 0) return 0;
       const start = Math.max(0, Math.min(playStart, vid.duration));
@@ -102,14 +114,12 @@
       barFine.setAttribute('aria-valuenow', Math.round(p*100));
       barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
 
-      // notify Wix (after intro only)
-      if (allowSync) {
-        const now = performance.now();
-        const minGap = 1000 / POST_TO_WIX_FPS;
-        if (now - lastWixSent >= minGap) {
-          lastWixSent = now;
-          parent.postMessage({ type:'videoProgress', value: p }, '*');
-        }
+      // always send progress (parent ignores while locked)
+      const now = performance.now();
+      const minGap = 1000 / POST_TO_WIX_FPS;
+      if (now - lastWixSent >= minGap) {
+        lastWixSent = now;
+        sendToParent({ type:'videoProgress', value: p });
       }
     }
 
@@ -159,14 +169,13 @@
       });
     });
 
-    /************** Metadata: set duration window **************/
+    /************** Metadata **************/
     vid.addEventListener('loadedmetadata', ()=>{
       const dur = isFinite(vid.duration) ? vid.duration : 0;
       if (dur > 0) {
         playStart = Math.max(0, Math.min(PLAY_START, dur));
         playEnd   = (PLAY_END == null) ? dur : Math.max(playStart, Math.min(PLAY_END, dur));
       }
-      // snap fills to current time (0 at start)
       setByRatio( (vid.currentTime && dur) ? (vid.currentTime / dur) : 0 );
     });
 
@@ -185,7 +194,7 @@
 
     /************** Parent (Wix) → Child: receive page scroll progress **************/
     window.addEventListener('message', (evt) => {
-      const msg = evt.data || {};
+      const msg = safeParse(evt.data);
       if (msg.type === 'scrollProgress') {
         const p = clamp01(Number(msg.value) || 0);
         setByRatio(p); // map page scroll (0..1) → video/bars
@@ -204,17 +213,17 @@
       v1.loop = true;
       try { v1.play().catch(()=>{}); } catch(_) {}
       accelerating = false;
-      allowSync = false; // block Wix sync while overlay shown
-      // 👉 LOCK page scroll in Wix
-      parent.postMessage({ type: 'lockScroll', value: true }, '*');
+      allowSync = false; // (parent still receives progress but ignores while locked)
+      // LOCK page scroll in Wix
+      sendToParent({ type: 'lockScroll', value: true });
     }
     function hideOverlay(){
       overlay.classList.remove('is-visible');
       overlay.classList.remove('mode-intro');
       try { v1.pause(); } catch(_) {}
       try { v2.pause(); } catch(_) {}
-      // 👉 UNLOCK page scroll in Wix
-      parent.postMessage({ type: 'lockScroll', value: false }, '*');
+      // UNLOCK page scroll in Wix
+      sendToParent({ type: 'lockScroll', value: false });
     }
     function accelerateAndFinish(){
       if (!overlay.classList.contains('is-visible')) return;
@@ -232,10 +241,10 @@
       try { v2.play().catch(()=>{}); } catch(_) {}
     });
 
-    // After intro ends, hide overlay and allow Wix sync
+    // After intro ends, hide overlay and allow parent to react to progress
     v2.addEventListener('ended', ()=>{
-      hideOverlay();        // also unlocks Wix scroll
-      allowSync = true;     // bars now also scroll the Wix page
+      hideOverlay();
+      allowSync = true;
     });
 
     // Any interaction on overlay accelerates screensaver
