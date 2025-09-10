@@ -261,6 +261,66 @@
       showOverlay('initial');
     })();
   </script>
+  <script>
+// ---------- CONFIG (optional) ----------
+// If you have explicit IDs, set them here; otherwise we fallback below.
+const VIDEO_SELECTOR  = '#myVideo';    // e.g. <video id="myVideo">
+const SLIDER_SELECTOR = '#scrubber';   // e.g. <input type="range" id="scrubber">
+
+// ---------- Grab elements (robust fallbacks) ----------
+const video  = document.querySelector(VIDEO_SELECTOR)  || document.querySelector('video');
+const slider = document.querySelector(SLIDER_SELECTOR) || document.querySelector('input[type="range"]');
+
+// tiny helper to clamp 0..1
+const clamp01 = v => Math.max(0, Math.min(1, v || 0));
+
+// throttle sends to avoid spamming parent
+let lastSent = 0;
+function sendProgress(p) {
+  const now = performance.now();
+  if (now - lastSent < 80) return; // ~12–15 msgs/sec is plenty
+  lastSent = now;
+  parent.postMessage({ type: 'videoProgress', value: clamp01(p) }, '*');
+}
+
+// ---------- Emit progress from slider (if present) ----------
+if (slider) {
+  // normalise slider (works even if you left default min/max)
+  const min = Number(slider.min || 0);
+  const max = Number(slider.max || 100);
+  const span = (max - min) || 1;
+
+  // whenever user scrubs, send % to parent
+  slider.addEventListener('input', () => {
+    const val = Number(slider.value || 0);
+    sendProgress((val - min) / span);
+  });
+}
+
+// ---------- Emit progress from video time ----------
+if (video) {
+  // when metadata is ready, send an initial progress (0)
+  video.addEventListener('loadedmetadata', () => {
+    sendProgress((video.currentTime || 0) / (video.duration || 1));
+  });
+
+  // on every timeupdate, send % to parent
+  video.addEventListener('timeupdate', () => {
+    if (!video.duration) return;
+    sendProgress(video.currentTime / video.duration);
+  });
+
+  // if you jump around programmatically (e.g., clicking “building” buttons),
+  // these will ensure we notify parent right away:
+  ['seeking', 'seeked', 'play', 'pause'].forEach(evt => {
+    video.addEventListener(evt, () => {
+      if (!video.duration) return;
+      sendProgress(video.currentTime / video.duration);
+    });
+  });
+}
+</script>
+
 </body>
 </html>
 
