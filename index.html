@@ -1,3 +1,4 @@
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,16 +8,22 @@
   <link rel="stylesheet" href="main.css" />
   <style>
     html,body{overflow:hidden;margin:0;padding:0;background:#000}
-    /* Make sure bars are interactive and above the video */
-    #scrubber, #scrubber2{
-      pointer-events:auto !important;
-      z-index:10000 !important;
-      cursor: ew-resize;
-      touch-action: none;
-    }
-    /* Overlay should block clicks while visible; when hidden allow events through */
-    #screensaver.is-visible { pointer-events:auto; }
+    /* keep bars interactive and above video */
+    #scrubber, #scrubber2{ pointer-events:auto!important; z-index:10000!important; cursor:ew-resize; touch-action:none; }
+    /* overlay should block clicks while visible; when hidden allow events through */
+    #screensaver.is-visible{ pointer-events:auto; }
     #screensaver:not(.is-visible){ pointer-events:none; }
+
+    /* === Minimal overrides you asked for === */
+    /* make both hitboxes a bit longer and invisible (still usable) */
+    :root { --bar-min: 360px; --bar-vw: 58vw; --bar-max: 960px; }
+    #scrubber, #scrubber2 {
+      width: clamp(var(--bar-min), var(--bar-vw), var(--bar-max)) !important;
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+    #scrubber .scrubber__fill, #scrubber2 .scrubber__fill,
+    #scrubber .scrubber__hint, #scrubber2 .scrubber__hint { display: none !important; }
   </style>
 </head>
 <body>
@@ -54,6 +61,10 @@
     const SNAP_TO_FRAMES = false;
     const FPS = 30;
 
+    // === Minimal smoothing knob (new) ===
+    const USE_SMOOTHING = true;   // turn off to revert to your original instant seeks
+    const SMOOTH_TAU_MS = 140;    // lower = snappier, higher = smoother
+
     // throttle messages to Wix (ms)
     const SEND_INTERVAL_MS = 50; // ~20 msgs/sec
 
@@ -62,8 +73,6 @@
 
     /************** Elements **************/
     const vid = document.getElementById('v0');
-    // NOTE: I’m keeping your original naming but swapping visual roles:
-    // #scrubber = fine (top), #scrubber2 = coarse (bottom). If that’s flipped on your CSS, it’s fine.
     const barFine   = document.getElementById('scrubber');
     const barCoarse = document.getElementById('scrubber2');
     const fillFine   = barFine.querySelector('.scrubber__fill');
@@ -82,15 +91,35 @@
 
     const clamp01 = v => Math.max(0, Math.min(1, Number(v)||0));
 
+    /************** Minimal smoother (add-only) **************/
+    const __smooth = { target: 0, display: 0, last: 0, raf: 0 };
+    function smoothSeek(t){
+      if (!USE_SMOOTHING) { vid.currentTime = t; return; }
+      __smooth.target = t;
+      if (!__smooth.raf) {
+        __smooth.display = vid.currentTime || 0;
+        __smooth.last = performance.now();
+        const step = (now)=>{
+          const dt = Math.max(0, now - __smooth.last); __smooth.last = now;
+          const alpha = 1 - Math.exp(-dt / SMOOTH_TAU_MS);
+          __smooth.display += ( __smooth.target - __smooth.display ) * alpha;
+          let tApply = SNAP_TO_FRAMES && FPS>0 ? Math.round(__smooth.display*FPS)/FPS : __smooth.display;
+          if (Math.abs((vid.currentTime||0) - tApply) > (SNAP_TO_FRAMES? (0.45/FPS) : 0.01)) {
+            try { if (typeof vid.fastSeek === 'function') vid.fastSeek(tApply); else vid.currentTime = tApply; }
+            catch(_) { vid.currentTime = tApply; }
+          }
+          __smooth.raf = requestAnimationFrame(step);
+        };
+        __smooth.raf = requestAnimationFrame(step);
+      }
+    }
+
     /************** Messaging helpers **************/
     function sendToParent(obj){
       try { parent.postMessage(JSON.stringify(obj), '*'); }
       catch(_) { try { parent.postMessage(obj, '*'); } catch(_) {} }
     }
-    function parseMsg(d){
-      if (typeof d === 'string') { try { return JSON.parse(d); } catch { return {}; } }
-      return d || {};
-    }
+    function parseMsg(d){ if (typeof d === 'string') { try { return JSON.parse(d); } catch { return {}; } } return d || {}; }
 
     /************** Core mapping **************/
     function ratioToTime(r){
@@ -106,9 +135,9 @@
     function setByRatio(r, {fromParent=false} = {}){
       if (!isFinite(vid.duration) || vid.duration <= 0) return;
 
-      // Seek video immediately
+      // ▼ CHANGED: use smoother instead of instant seek
       const t = ratioToTime(r);
-      vid.currentTime = t;
+      smoothSeek(t);
 
       // p = 0..1 progress within active window
       const endForP = (playEnd==null ? (vid.duration||1) : playEnd);
@@ -131,32 +160,22 @@
     }
 
     /************** Hover/drag wiring (no click required) **************/
-    function ratioFromClientX(root, x){
-      const rect = root.getBoundingClientRect();
-      const dx = Math.min(Math.max(0, x - rect.left), rect.width);
-      return rect.width ? (dx / rect.width) : 0;
-    }
-    function inside(root, x, y){
-      const r = root.getBoundingClientRect();
-      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-    }
+    function ratioFromClientX(root, x){ const rect = root.getBoundingClientRect(); const dx = Math.min(Math.max(0, x - rect.left), rect.width); return rect.width ? (dx / rect.width) : 0; }
+    function inside(root, x, y){ const r = root.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
 
-    // Enter bar → update immediately
     [barFine, barCoarse].forEach(root=>{
       root.addEventListener('pointerenter', e => setByRatio(ratioFromClientX(root, e.clientX)));
       root.addEventListener('mouseenter',   e => setByRatio(ratioFromClientX(root, e.clientX)));
     });
 
-    // Global move: if over a bar, update continuously
     function onMove(e){
       const { clientX:x, clientY:y } = e;
       if (inside(barFine, x, y))   { setByRatio(ratioFromClientX(barFine,   x)); return; }
       if (inside(barCoarse, x, y)) { setByRatio(ratioFromClientX(barCoarse, x)); return; }
     }
-    window.addEventListener('mousemove', onMove, { passive:true });
-    window.addEventListener('pointermove', onMove, { passive:true });
+    addEventListener('mousemove', onMove, { passive:true });
+    addEventListener('pointermove', onMove, { passive:true });
 
-    // Drag (touch/mouse)
     [barFine, barCoarse].forEach(root=>{
       let dragging = false;
       root.addEventListener('pointerdown', e=>{ dragging=true; root.setPointerCapture?.(e.pointerId); setByRatio(ratioFromClientX(root, e.clientX)); });
@@ -189,13 +208,12 @@
     });
 
     /************** Parent → Child: receive page scroll as 0..1 **************/
-    window.addEventListener('message', (evt) => {
+    addEventListener('message', (evt) => {
       const msg = parseMsg(evt.data);
       if (msg.type === 'scrollValue') {
         const p = clamp01(Number(msg.value) || 0);
         applyingFromParent = true;
         setByRatio(p, {fromParent:true});
-        // small delay to avoid echo
         setTimeout(()=>{ applyingFromParent = false; }, SEND_INTERVAL_MS);
       }
     });
@@ -214,7 +232,6 @@
       try { v1.play().catch(()=>{}); } catch(_) {}
 
       allowSync = false; // parent should ignore scrub until intro done
-      // Hint to parent (optional; safe if ignored)
       sendToParent({ type: 'lockScroll', value: true });
     }
     function hideOverlay(){
@@ -223,9 +240,8 @@
       overlay.classList.remove('mode-intro');
       try { v1.pause(); } catch(_) {}
       try { v2.pause(); } catch(_) {}
-      // Allow sync now
       allowSync = true;
-      sendToParent({ type: 'lockScroll', value: false }); // optional
+      sendToParent({ type: 'lockScroll', value: false });
     }
     function accelerateAndFinish(){
       if (!overlay.classList.contains('is-visible')) return;
@@ -236,25 +252,20 @@
       try { v1.play().catch(()=>{}); } catch(_) {}
     }
 
-    // After screensaver ends, play intro
     v1.addEventListener('ended', ()=>{
       if (!overlay.classList.contains('is-visible')) return;
       overlay.classList.add('mode-intro');
       try { v2.play().catch(()=>{}); } catch(_) {}
     });
 
-    // After intro ends, hide overlay and enable sync
-    v2.addEventListener('ended', ()=>{
-      hideOverlay();
-    });
+    v2.addEventListener('ended', ()=>{ hideOverlay(); });
 
-    // Any interaction on overlay accelerates screensaver
     ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev=>{
       overlay.addEventListener(ev, accelerateAndFinish, { passive:true });
     });
 
-    // Start with overlay visible
     showOverlay();
   </script>
 </body>
 </html>
+```
