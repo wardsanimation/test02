@@ -1,4 +1,3 @@
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14,16 +13,28 @@
     #screensaver.is-visible{ pointer-events:auto; }
     #screensaver:not(.is-visible){ pointer-events:none; }
 
-    /* === Minimal overrides you asked for === */
-    /* make both hitboxes a bit longer and invisible (still usable) */
-    :root { --bar-min: 360px; --bar-vw: 58vw; --bar-max: 960px; }
+    /* === Longer bars (width only) === */
+    /* Increase preferred width and allow a larger cap (good for iPad landscape) */
+    :root { --bar-min: 520px; --bar-vw: 96vw; --bar-max: 1360px; }
+
     #scrubber, #scrubber2 {
       width: clamp(var(--bar-min), var(--bar-vw), var(--bar-max)) !important;
-      background: transparent !important;
+      background: transparent !important; /* keep the track minimal unless overridden */
       box-shadow: none !important;
     }
-    #scrubber .scrubber__fill, #scrubber2 .scrubber__fill,
-    #scrubber .scrubber__hint, #scrubber2 .scrubber__hint { display: none !important; }
+
+    /* Hide hint/fill only for the big invisible coarse bar */
+    #scrubber .scrubber__fill,
+    #scrubber .scrubber__hint { display: none !important; }
+
+    /* === Make the fine/frame-control bar visibly RED === */
+    /* Show the fill and color it red; keep hint hidden */
+    #scrubber2 .scrubber__hint { display: none !important; }
+    #scrubber2 .scrubber__fill {
+      display: block !important;
+      background: #ff2b2b !important;   /* red progress */
+      /* no height set here, so whatever your main.css defines stays the same (not taller) */
+    }
   </style>
 </head>
 <body>
@@ -38,7 +49,7 @@
     <div class="scrubber__hint" aria-hidden="true">scrub</div>
   </div>
 
-  <!-- Small visible red scrub bar (fine) -->
+  <!-- Small visible red scrub bar (fine / frame control) -->
   <div id="scrubber2" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
     <div class="scrubber__fill" aria-hidden="true"></div>
     <div class="scrubber__hint" aria-hidden="true">coarse</div>
@@ -268,4 +279,3 @@
   </script>
 </body>
 </html>
-```
